@@ -1,49 +1,31 @@
 /**
  * Vision extraction: schedule screenshot in, structured course list out.
  *
+ * This file owns the prompt, the JSON schema hand-off, and the normalization of
+ * whatever comes back. Which vendor actually looks at the image is
+ * `lib/providers.ts`'s problem — Anthropic, OpenAI, Gemini, and OpenRouter are
+ * all supported and interchangeable here.
+ *
  * Deliberately stateless — the image is held in memory for the length of one
  * request and never written anywhere. Schedules can carry names, IDs, and
  * advisor notes, and there is no product reason to retain any of it.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import { ExtractionError } from "./errors";
+import { callVisionModel, resolveProvider, type SupportedImageType } from "./providers";
 import { EXTRACTION_JSON_SCHEMA } from "./schema";
 import { WEEKDAYS, type ExtractedCourse, type ExtractionResult, type Weekday } from "./types";
 
-export const SUPPORTED_IMAGE_TYPES = [
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-] as const;
-
-export type SupportedImageType = (typeof SUPPORTED_IMAGE_TYPES)[number];
-
-/** Claude's per-image limit is 5MB base64-encoded; leave room for the overhead. */
-export const MAX_IMAGE_BYTES = 3.5 * 1024 * 1024;
-
-const MODEL = process.env.EXTRACTION_MODEL ?? "claude-opus-5";
-
-const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
-type Effort = (typeof EFFORT_LEVELS)[number];
-
-/**
- * `medium` is the default because extraction is a read-and-transcribe task, not
- * a reasoning-heavy one, and this runs once per upload at real cost. Raise it
- * via EXTRACTION_EFFORT if your portal's layouts are genuinely hard to read.
- */
-const EFFORT: Effort = (EFFORT_LEVELS as readonly string[]).includes(
-  process.env.EXTRACTION_EFFORT ?? "",
-)
-  ? (process.env.EXTRACTION_EFFORT as Effort)
-  : "medium";
-
-/**
- * Server-side refusal fallbacks are opt-in. They cost nothing when unused and
- * turn a hard failure into a served response, so they're on unless disabled.
- */
-const FALLBACKS_ENABLED = process.env.DISABLE_REFUSAL_FALLBACKS !== "1";
-const FALLBACK_BETA = "server-side-fallback-2026-07-01";
+export { ExtractionError };
+export {
+  MAX_IMAGE_BYTES,
+  PROVIDERS,
+  SUPPORTED_IMAGE_TYPES,
+  configuredProviders,
+  isProvider,
+  type Provider,
+  type SupportedImageType,
+} from "./providers";
 
 const SYSTEM_PROMPT = `You read university course schedules out of images and return structured data.
 
@@ -64,15 +46,6 @@ Never include semester start or end dates — schedules rarely show them and the
 
 const USER_PROMPT =
   "Extract every course from this schedule image.";
-
-export class ExtractionError extends Error {
-  readonly status: number;
-
-  constructor(message: string, status = 502) {
-    super(message);
-    this.status = status;
-  }
-}
 
 const WEEKDAY_SET = new Set<string>(WEEKDAYS);
 
@@ -130,10 +103,21 @@ function normalizeCourse(raw: unknown): ExtractedCourse | null {
   };
 }
 
-function parseModelOutput(text: string): ExtractionResult {
+/**
+ * Strip a ```json fence if one is present. Structured-output modes are supposed
+ * to make this impossible, but support varies by vendor and — on OpenRouter —
+ * by whichever model the slug points at, so unwrap rather than fail.
+ */
+function unwrapJson(text: string): string {
+  const trimmed = text.trim();
+  const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n?```$/.exec(trimmed);
+  return (fenced ? fenced[1] : trimmed).trim();
+}
+
+export function parseModelOutput(text: string): ExtractionResult {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(unwrapJson(text));
   } catch {
     throw new ExtractionError("The model returned output we could not parse.");
   }
@@ -158,111 +142,30 @@ function parseModelOutput(text: string): ExtractionResult {
   return { courses, warnings };
 }
 
-/** True when a request failed specifically because of the beta fallback opt-in. */
-function isFallbackOptInRejection(error: unknown): boolean {
-  if (!(error instanceof Anthropic.BadRequestError)) return false;
-  return /fallback/i.test(error.message);
+export interface ExtractOptions {
+  /** Force a specific vendor for this call; defaults to the server's choice. */
+  provider?: string | null;
 }
 
 export async function extractSchedule(
   imageBase64: string,
   mediaType: SupportedImageType,
+  options: ExtractOptions = {},
 ): Promise<ExtractionResult> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new ExtractionError(
-      "The server is missing ANTHROPIC_API_KEY, so extraction is unavailable.",
-      503,
-    );
-  }
+  const provider = resolveProvider(options.provider);
 
-  const client = new Anthropic({ apiKey });
-
-  const request = {
-    model: MODEL,
-    max_tokens: 8000,
+  const response = await callVisionModel({
+    provider,
+    imageBase64,
+    mediaType,
     system: SYSTEM_PROMPT,
-    output_config: {
-      effort: EFFORT,
-      format: { type: "json_schema" as const, schema: EXTRACTION_JSON_SCHEMA },
-    },
-    messages: [
-      {
-        role: "user" as const,
-        content: [
-          {
-            type: "image" as const,
-            source: {
-              type: "base64" as const,
-              media_type: mediaType,
-              data: imageBase64,
-            },
-          },
-          { type: "text" as const, text: USER_PROMPT },
-        ],
-      },
-    ],
+    user: USER_PROMPT,
+    schema: EXTRACTION_JSON_SCHEMA,
+  });
+
+  return {
+    ...parseModelOutput(response.text),
+    provider: response.provider,
+    model: response.model,
   };
-
-  /**
-   * The beta and non-beta message types differ only in ways we don't touch, so
-   * both branches are read through this minimal shape.
-   */
-  interface ModelResponse {
-    stop_reason: string | null;
-    content: Array<{ type: string; text?: string }>;
-  }
-
-  let response: ModelResponse;
-  try {
-    response = FALLBACKS_ENABLED
-      ? ((await client.beta.messages.create({
-          ...request,
-          betas: [FALLBACK_BETA],
-          fallbacks: "default",
-          // `fallbacks` is a beta parameter the SDK types don't carry yet.
-        } as Parameters<typeof client.beta.messages.create>[0])) as ModelResponse)
-      : ((await client.messages.create(request)) as ModelResponse);
-  } catch (error) {
-    // The fallback opt-in is a beta surface; if this deployment's account or
-    // API version rejects it, fall through to a plain request rather than
-    // failing the upload.
-    if (FALLBACKS_ENABLED && isFallbackOptInRejection(error)) {
-      response = (await client.messages.create(request)) as ModelResponse;
-    } else if (error instanceof Anthropic.RateLimitError) {
-      throw new ExtractionError(
-        "The extraction service is busy right now. Try again in a moment.",
-        429,
-      );
-    } else if (error instanceof Anthropic.APIError) {
-      throw new ExtractionError(
-        "The extraction service rejected the request.",
-        502,
-      );
-    } else {
-      throw new ExtractionError("Could not reach the extraction service.", 502);
-    }
-  }
-
-  // Check the stop reason before touching content: a refusal returns HTTP 200
-  // with an empty or partial content array.
-  if (response.stop_reason === "refusal") {
-    throw new ExtractionError(
-      "The model declined to read this image. Try a screenshot that shows only your class schedule.",
-      422,
-    );
-  }
-  if (response.stop_reason === "max_tokens") {
-    throw new ExtractionError(
-      "That schedule was too long to read in one pass. Try uploading it in sections.",
-      422,
-    );
-  }
-
-  const text = response.content.find((block) => block.type === "text")?.text;
-  if (!text) {
-    throw new ExtractionError("The model returned an empty response.");
-  }
-
-  return parseModelOutput(text);
 }

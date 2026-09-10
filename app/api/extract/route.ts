@@ -6,6 +6,7 @@ import {
   type SupportedImageType,
   extractSchedule,
 } from "@/lib/extract";
+import { PROVIDERS, configuredProviders, modelFor, resolveProvider } from "@/lib/providers";
 import { checkRateLimit, clientKey } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
@@ -21,13 +22,42 @@ function error(message: string, status: number, extraHeaders?: HeadersInit) {
 }
 
 /**
+ * GET /api/extract
+ *
+ * Which providers this deployment can actually use, and which one an
+ * unqualified POST will hit. Cheap way for an integrator (or a deploy check) to
+ * confirm a key landed without burning a vision call.
+ */
+export function GET() {
+  let selected: string | null = null;
+  let model: string | null = null;
+  try {
+    const provider = resolveProvider();
+    selected = provider;
+    model = modelFor(provider);
+  } catch {
+    // No key configured, or a bad EXTRACTION_PROVIDER pin. `providers: []`
+    // below says so without leaking the reason.
+  }
+
+  return NextResponse.json(
+    { providers: configuredProviders(), supported: PROVIDERS, default: selected, model },
+    { headers: { "Cache-Control": "no-store" } },
+  );
+}
+
+/**
  * POST /api/extract
  *
  * Accepts either `multipart/form-data` with an `image` file (what the browser
  * sends) or `application/json` with `{ imageBase64, mediaType }` (convenient
  * for server-to-server integration).
  *
- * Responds with `{ courses, warnings }`. Nothing is persisted.
+ * An optional `provider` (form field, JSON key, or `?provider=` query) picks
+ * which vendor reads the image; omit it to use whatever the server is
+ * configured for.
+ *
+ * Responds with `{ courses, warnings, provider, model }`. Nothing is persisted.
  */
 export async function POST(request: Request) {
   const limit = checkRateLimit(clientKey(request));
@@ -41,6 +71,8 @@ export async function POST(request: Request) {
 
   let base64: string;
   let mediaType: SupportedImageType;
+  // Query string first so a caller can override without rebuilding the body.
+  let provider: string | null = new URL(request.url).searchParams.get("provider");
 
   const contentType = request.headers.get("content-type") ?? "";
 
@@ -62,11 +94,17 @@ export async function POST(request: Request) {
       }
       base64 = Buffer.from(await file.arrayBuffer()).toString("base64");
       mediaType = file.type;
+      const field = form.get("provider");
+      if (typeof field === "string" && field.trim()) provider ??= field.trim();
     } else if (contentType.includes("application/json")) {
       const body = (await request.json()) as {
         imageBase64?: unknown;
         mediaType?: unknown;
+        provider?: unknown;
       };
+      if (typeof body.provider === "string" && body.provider.trim()) {
+        provider ??= body.provider.trim();
+      }
       if (typeof body.imageBase64 !== "string" || !body.imageBase64) {
         return error("Provide `imageBase64` as a base64-encoded string.", 400);
       }
@@ -92,8 +130,15 @@ export async function POST(request: Request) {
     return error("Could not read the request body.", 400);
   }
 
+  if (provider && !(PROVIDERS as readonly string[]).includes(provider)) {
+    return error(
+      `Unknown provider "${provider}". Use one of: ${PROVIDERS.join(", ")}.`,
+      400,
+    );
+  }
+
   try {
-    const result = await extractSchedule(base64, mediaType);
+    const result = await extractSchedule(base64, mediaType, { provider });
     return NextResponse.json(result, {
       // Extraction output is per-user and never reusable.
       headers: { "Cache-Control": "no-store" },

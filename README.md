@@ -7,7 +7,7 @@ events — to Apple Calendar (or Google, or Outlook) in one tap.
 ## Running it
 
 ```bash
-cp .env.example .env.local   # add your ANTHROPIC_API_KEY
+cp .env.example .env.local   # add one provider API key
 npm install
 npm run dev
 ```
@@ -19,20 +19,56 @@ npm run dev
 | `npm test` | Vitest — ICS generation plus `ical.js` round-trip parsing |
 | `npm run lint` | ESLint |
 
-Only `ANTHROPIC_API_KEY` is required. The rest of `.env.example` is optional
-tuning.
+One vision provider key is required — Anthropic, OpenAI, Gemini, or OpenRouter
+(see [Providers](#providers)). The rest of `.env.example` is optional tuning.
 
 ## How it works
 
 ```
 image ──► POST /api/extract ──► editable review cards ──► POST /api/generate-ics ──► .ics
-             (Claude vision)      (you fix the misreads)      (RFC 5545)
+            (a vision model)      (you fix the misreads)      (RFC 5545)
 ```
 
 There is **no database and no storage**. The uploaded image lives in memory for
 the length of one request and is never written anywhere; extracted data lives in
 React state until you close the tab. Schedules routinely carry names, student
 IDs, and advisor notes, and nothing here needs to keep them.
+
+## Providers
+
+Extraction runs against whichever of these the server has a key for:
+
+| Provider | Key | Model env | Default |
+| --- | --- | --- | --- |
+| `anthropic` | `ANTHROPIC_API_KEY` | `ANTHROPIC_MODEL` | `claude-opus-5` |
+| `openai` | `OPENAI_API_KEY` | `OPENAI_MODEL` | `gpt-5` |
+| `gemini` | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `GEMINI_MODEL` | `gemini-2.5-pro` |
+| `openrouter` | `OPENROUTER_API_KEY` | `OPENROUTER_MODEL` | `google/gemini-2.5-pro` |
+
+With several keys present the table order decides; `EXTRACTION_PROVIDER` pins one
+outright, and a request can override per call. **A provider you asked for but
+have no key for is a `503`, never a silent switch to another vendor.** The
+default model ids are a starting point — every account has a different model
+list, so set the provider's own env var to something you can reach. OpenRouter
+ids are always `vendor/model`.
+
+Each provider is asked for the same JSON schema through its own structured-output
+mechanism (`output_config.format`, `response_format.json_schema`,
+`generationConfig.responseSchema`), so the response shape below does not change
+with the provider. `*_BASE_URL` points any of the last three at a gateway or
+proxy.
+
+`GET /api/extract` reports what a deployment can actually do, without spending a
+vision call:
+
+```jsonc
+{
+  "providers": ["anthropic", "openai"],   // keys present, in preference order
+  "supported": ["anthropic", "openai", "gemini", "openrouter"],
+  "default": "anthropic",                 // what an unqualified POST will use
+  "model": "claude-opus-5"
+}
+```
 
 ## API contract
 
@@ -47,6 +83,9 @@ Image in, structured courses out.
 Accepts `multipart/form-data` with an `image` file (what the browser sends), or
 `application/json` with `{ imageBase64, mediaType }` for server-to-server use.
 JPEG, PNG, GIF, and WebP; 3.5MB max.
+
+An optional `provider` — form field, JSON key, or `?provider=` query string —
+picks the vendor for that one call. Omit it to use the server's default.
 
 ```jsonc
 // 200
@@ -63,13 +102,18 @@ JPEG, PNG, GIF, and WebP; 3.5MB max.
       "async": false
     }
   ],
-  "warnings": ["Tuesday times were inferred as PM from surrounding rows."]
+  "warnings": ["Tuesday times were inferred as PM from surrounding rows."],
+  "provider": "anthropic",         // which vendor read the image
+  "model": "claude-opus-5"
 }
 ```
 
-Errors are `{ "error": string }` with a meaningful status: `413` too large,
-`415` wrong type, `422` unreadable or declined, `429` rate limited, `503` no API
-key configured.
+`provider` and `model` are informational — useful when a read goes wrong and you
+need to know who produced it. Everything else is stable across providers.
+
+Errors are `{ "error": string }` with a meaningful status: `400` unknown
+provider, `413` too large, `415` wrong type, `422` unreadable or declined, `429`
+rate limited, `503` no key for the requested provider.
 
 ### `POST /api/generate-ics`
 

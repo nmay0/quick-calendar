@@ -86,4 +86,11 @@ export interface ExtractionResult {
   courses: ExtractedCourse[];
   /** Things the model was unsure about, surfaced above the review table. */
   warnings: string[];
+  /**
+   * Which vendor and model read the image. Informational — several providers
+   * are supported and a caller debugging a bad read needs to know which one
+   * produced it. Optional so older clients and fixtures stay valid.
+   */
+  provider?: string;
+  model?: string;
 }
