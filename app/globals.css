@@ -1,26 +1,74 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f7f7f8;
+  --surface: #ffffff;
+  --foreground: #16161a;
+  --muted: #5b5b66;
+  --border: #dedee4;
+  --accent: #2f5fd8;
+  --accent-foreground: #ffffff;
+  --danger: #b3261e;
+  --warning-bg: #fff6e0;
+  --warning-border: #f0cf87;
+  --warning-foreground: #6b4a00;
 }
 
 @theme inline {
   --color-background: var(--background);
+  --color-surface: var(--surface);
   --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-line: var(--border);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-danger: var(--danger);
+  --color-warning-bg: var(--warning-bg);
+  --color-warning-border: var(--warning-border);
+  --color-warning-foreground: var(--warning-foreground);
   --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #101014;
+    --surface: #1a1a20;
+    --foreground: #ececf1;
+    --muted: #a0a0ad;
+    --border: #32323c;
+    --accent: #7ea2ff;
+    --accent-foreground: #0d1220;
+    --danger: #ff8d85;
+    --warning-bg: #2d2413;
+    --warning-border: #6a5423;
+    --warning-foreground: #f3d79a;
   }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), system-ui, sans-serif;
+  /* Keep the bottom action bar clear of the iOS home indicator. */
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/*
+ * Every interactive control clears the 44px iOS touch target, and inputs stay
+ * at 16px so mobile Safari doesn't zoom the viewport when one is focused.
+ */
+input,
+select,
+textarea,
+button {
+  font-size: 16px;
+  font-family: inherit;
+}
+
+input[type="date"],
+input[type="time"] {
+  /* Safari won't stretch native pickers to the field width without this. */
+  min-height: 44px;
+  -webkit-appearance: none;
+  appearance: none;
 }
