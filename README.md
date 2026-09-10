@@ -4,8 +4,6 @@ Upload a screenshot of a university course schedule, check what was read off it,
 and get a `.ics` that adds the whole semester — classes, exams, and one-off
 events — to Apple Calendar (or Google, or Outlook) in one tap.
 
-Built from [`PLAN.md`](./PLAN.md).
-
 ## Running it
 
 ```bash
