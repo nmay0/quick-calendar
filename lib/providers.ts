@@ -225,8 +225,18 @@ export interface VisionResponse {
   model: string;
 }
 
-/** Leaves headroom under the route's 60s `maxDuration` for our own error handling. */
-const REQUEST_TIMEOUT_MS = 55_000;
+/**
+ * Leaves headroom under the route's `maxDuration` for our own error handling.
+ * Read per call rather than frozen at import so a deployment on a platform with
+ * a longer function limit can raise it via `EXTRACT_TIMEOUT_MS` — and so the
+ * timeout path is testable without a 55s test.
+ */
+const DEFAULT_REQUEST_TIMEOUT_MS = 55_000;
+
+function requestTimeoutMs(): number {
+  const raw = Number(process.env.EXTRACT_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_REQUEST_TIMEOUT_MS;
+}
 
 // ---------------------------------------------------------------------------
 // Anthropic
@@ -312,6 +322,13 @@ async function callAnthropic(req: VisionRequest): Promise<VisionResponse> {
         "The extraction service is busy right now. Try again in a moment.",
         429,
       );
+    } else if (error instanceof Anthropic.APIConnectionTimeoutError) {
+      // Must precede the APIError branch — in the SDK this is a subclass of it.
+      console.error(`Anthropic did not respond in time (model ${modelFor("anthropic")})`);
+      throw new ExtractionError(
+        "The extraction model took too long to read that image. Try a smaller or simpler screenshot, or switch to a faster model.",
+        504,
+      );
     } else if (error instanceof Anthropic.APIError) {
       throw new ExtractionError("The extraction service rejected the request.", 502);
     } else {
@@ -380,9 +397,11 @@ async function postJson(
       method: "POST",
       headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(requestTimeoutMs()),
     });
-  } catch {
+  } catch (error) {
+    if (isAbort(error)) throw timeoutError(provider);
+    console.error(`${PROVIDER_SPECS[provider].label} was unreachable`, error);
     throw new ExtractionError("Could not reach the extraction service.", 502);
   }
 
@@ -392,9 +411,38 @@ async function postJson(
 
   try {
     return await response.json();
-  } catch {
+  } catch (error) {
+    // Not a redundant second check. These vendors send response headers as soon
+    // as they accept the request — measured 4s against OpenRouter — and only
+    // then hold the connection open while the model generates. So a slow model
+    // aborts HERE, mid-body, with `response.ok` already true; the abort reaches
+    // the fetch() catch above only when the request never got that far.
+    if (isAbort(error)) throw timeoutError(provider);
     throw new ExtractionError("The extraction service returned an unreadable response.");
   }
+}
+
+/** `AbortSignal.timeout` rejects with a TimeoutError DOMException. */
+function isAbort(error: unknown): boolean {
+  return (
+    error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")
+  );
+}
+
+/**
+ * A timeout and a dead socket are different problems with different fixes, so
+ * don't collapse them into one message — mislabelling one as the other is
+ * expensive to debug.
+ */
+function timeoutError(provider: Provider): ExtractionError {
+  console.error(
+    `${PROVIDER_SPECS[provider].label} did not respond within ${requestTimeoutMs() / 1000}s ` +
+      `(model ${modelFor(provider)}) — the model is too slow for this route`,
+  );
+  return new ExtractionError(
+    "The extraction model took too long to read that image. Try a smaller or simpler screenshot, or switch to a faster model.",
+    504,
+  );
 }
 
 // ---------------------------------------------------------------------------

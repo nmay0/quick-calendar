@@ -44,3 +44,7 @@ PLAN.md
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# schedule screenshots used for testing — personal data, never commit
+Screenshot*.png
+*.screenshot.png

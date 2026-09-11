@@ -72,12 +72,24 @@ function normalizeCourse(raw: unknown): ExtractedCourse | null {
       )
     : [];
 
+  // The prompt asks for 24-hour "HH:MM" and the JSON Schema declares a pattern,
+  // but no vendor actually enforces `pattern` in structured-output mode —
+  // gemini-2.5-flash-lite returns "9:30 AM" for the same image gpt-5-nano
+  // renders as "09:30". Rejecting those would blank every time on the card and
+  // look like the model simply missed them, so parse the 12-hour form too.
   const time = (input: unknown): string | null => {
     if (typeof input !== "string") return null;
-    const match = /^(\d{1,2}):([0-5]\d)$/.exec(input.trim());
+    const match = /^(\d{1,2}):([0-5]\d)(?:\s*([ap])\.?m?\.?)?$/i.exec(input.trim());
     if (!match) return null;
-    const hour = Number(match[1]);
-    if (hour > 23) return null;
+    let hour = Number(match[1]);
+    const meridiem = match[3]?.toLowerCase();
+    if (meridiem) {
+      // 12 AM is hour 0 and 12 PM is hour 12; every other PM hour adds 12.
+      if (hour < 1 || hour > 12) return null;
+      hour = meridiem === "a" ? hour % 12 : (hour % 12) + 12;
+    } else if (hour > 23) {
+      return null;
+    }
     return `${String(hour).padStart(2, "0")}:${match[2]}`;
   };
 

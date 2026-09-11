@@ -52,6 +52,23 @@ default model ids are a starting point — every account has a different model
 list, so set the provider's own env var to something you can reach. OpenRouter
 ids are always `vendor/model`.
 
+**The model you pick must accept image input and support structured outputs.** A
+text-only model fails at request time, and the provider having a key says
+nothing about the model being able to see. On OpenRouter both are checkable
+before you pin anything:
+
+```sh
+curl -s https://openrouter.ai/api/v1/models | jq -r '.data[]
+  | select(.architecture.input_modalities | index("image"))
+  | select(.supported_parameters | index("structured_outputs")) | .id'
+```
+
+Prefer a non-reasoning vision model. Reasoning tokens bill and stall against the
+same ceiling as the answer, and a reasoning model that is fast on a tidy
+schedule can exceed the request timeout on a dense one. `EXTRACT_TIMEOUT_MS`
+(default `55000`) sets that ceiling; keep it under the route's `maxDuration` so
+a timeout returns a `504` rather than the platform killing the function.
+
 Each provider is asked for the same JSON schema through its own structured-output
 mechanism (`output_config.format`, `response_format.json_schema`,
 `generationConfig.responseSchema`), so the response shape below does not change

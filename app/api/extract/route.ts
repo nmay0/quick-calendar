@@ -11,7 +11,7 @@ import { checkRateLimit, clientKey } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 /** Vision calls take a while; give the route room beyond the platform default. */
-export const maxDuration = 60;
+export const maxDuration = 70;
 
 function isSupported(type: string): type is SupportedImageType {
   return (SUPPORTED_IMAGE_TYPES as readonly string[]).includes(type);
