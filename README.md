@@ -2,7 +2,7 @@
 
 Upload a screenshot of a university course schedule, check what was read off it,
 and get a `.ics` that adds the whole semester — classes, exams, and one-off
-events — to Apple Calendar (or Google, or Outlook) in one tap.
+events — to Apple Calendar (or Google, or Outlook) in one tap. Calendar views can get a bit tricky depending on how the times are arranged. A list view of the schedule works instantly with no hiccups.
 
 ## Running it
 
